@@ -1,0 +1,260 @@
+// will try to make program to get angles x and y from data from gyroscope and accelerometer by using a complementary filter.
+
+#include <Wire.h>
+int  ADXLAddress= 0x53; // address of accelerometer
+int  L3G4200_Address= 0x69; // address of gyro
+
+// defining registries for accelerometer
+#define X_Axis_Register_DATAX0 0x32
+#define X_Axis_Register_DATAX1 0x33
+#define Y_Axis_Register_DATAY0 0x34
+#define Y_Axis_Register_DATAY1 0x35
+#define Z_Axis_Register_DATAZ0 0x36
+#define Z_Axis_Register_DATAZ1 0x37
+#define Power_Register 0x2d
+#define Data_Register_ADXL 0x31 // here sets up range and resolution of accelerometer how how each unit is scaled to gravity and the gravity range to measure on the accelerometer
+
+//defining addresses for L3G4200 Gyro
+#define CTRL_REG1 0x20
+#define CTRL_REG2 0x21
+#define CTRL_REG3 0x22
+#define CTRL_REG4 0x23
+#define CTRL_REG5 0x24
+
+
+
+// values for ADXL accelerometer
+int Z, Z0 , Z1 , X ,  X0 , X1 , Y , Y0  , Y1, p  ;
+float X_cal, Y_cal;
+float X2,Y2, Z2;
+double  pitch_angle_ADXL, roll_angle_ADXL;
+
+//values used w/ filter to get true angles
+float true_roll =0;
+float true_pitch=0;
+
+// Old calibration scores 
+// in comment for now to save space
+/*
+float gain1_roll= .98;
+float gain2_roll= .02;
+float gain1_pitch=0;
+float gain2_pitch=0;
+float roll_drift,pitch_drift;
+float roll_offset, pitch_offest;
+float roll_gyro,pitch_gyro;
+
+*/
+//For use in delay and integrate omagas
+int t= 50; //delay in micrometers
+float period= t*1e-6;
+// values for use in gyro
+ int omega_roll1, omega_pitch1, roll0,roll1,pitch0,pitch1;
+ float omega_roll, omega_pitch;  // This will be the velocities
+ float pitch_cal, roll_cal; // for calibrations
+void setup() 
+  {
+  // put your setup code here, to run once:
+  Wire.begin();
+  Serial.begin(9600);
+  delay(100);
+// Turn on Gyroscope
+ writeRegister(L3G4200_Address, CTRL_REG1, 0b10111111);
+ 
+ writeRegister(L3G4200_Address, CTRL_REG2, 0b00000000);
+ 
+ writeRegister(L3G4200_Address, CTRL_REG3, 0b00001000);
+ 
+ writeRegister(L3G4200_Address, CTRL_REG5, 0b00000000);
+
+// setting up gyro to be 500 degrees per second so can transform from datasheets
+  writeRegister(L3G4200_Address, CTRL_REG4, 0b00010000);
+  
+ // Turn on Accelerometer
+  Wire.beginTransmission(ADXLAddress);
+  Wire.write(Power_Register);
+  Wire.write(8);
+  Wire.endTransmission();
+
+// Putting +/- 16g range and uniform resolution to the accelermoter
+  Wire.beginTransmission(ADXLAddress);
+  Wire.write(Data_Register_ADXL);
+  Wire.write(0x0B);
+  Wire.endTransmission(); 
+  
+ // Do a calibration test for axes of accelerometer
+  Serial.print("                   ****Beginning  calibration of accelerometer****      \n");
+  for(p=1;p<=2000;p++)
+    {
+    getADXL_Values();
+
+    X_cal= X_cal+X;
+    Y_cal= Y_cal+Y; 
+  
+  }
+  X_cal=X_cal/p;
+  Y_cal=Y_cal/p;
+  Serial.print("Axes calibration complete; For 2000 tests, is a follows: \n ");
+  Serial.print(" \n The X is as follows:");
+  Serial.print(X_cal);
+  Serial.print("           The Y is as follows:");
+  Serial.print(Y_cal);
+  Serial.print(" \n End of  calibration \n"); 
+  
+
+ //Calibrating the gyroscope
+  Serial.print("                   ****Beginning of Calibration of Gyroscope****          \n");
+  for(p=1;p<=2000;p++)
+    {
+     getGyro_Values();
+     roll_cal=omega_roll+roll_cal;
+     pitch_cal= omega_pitch + pitch_cal;
+    }
+roll_cal= roll_cal/p;
+pitch_cal=pitch_cal/p;
+Serial.print(" GYRO Calibration Complete; For 2000 tests, get following results: \n");
+Serial.print("The roll is as follows: ");
+Serial.print(roll_cal);
+Serial.print("                      The pitch is as follows: ");
+Serial.print(pitch_cal);
+Serial.print("\n");
+  }
+
+void loop() 
+    {
+    // see function to see how it works; gets called every time
+    getADXL_Values();
+     
+     //Now to get derived roll and pitch approximations from the accelerometer
+     // But first must adjust for off-set
+     X2=X2-X_cal;
+     Y2=Y2-Y_cal;
+     
+     double P= sqrt(X2*X2 +Z2*Z2);
+    roll_angle_ADXL= atan2(Y2, P)*(180/3.1415) ;// convert to degrees
+     P= sqrt(Y2*Y2+Z2*Z2);
+    pitch_angle_ADXL=atan2(X2,P)*(180/3.1415);
+    
+    Serial.print("PITCH ANGLE= ");
+    Serial.print(pitch_angle_ADXL);
+    
+   
+    Serial.print("        ROLL ANGLE= ");
+    Serial.print(roll_angle_ADXL);
+    
+   
+   
+   getGyro_Values();
+   /*
+    Serial.print("       PITCH VELOCITY= ");
+    Serial.print(omega_pitch);
+    
+   
+    Serial.print("       ROLL VELOCITY= ");
+    Serial.print(omega_roll);
+    
+    /*Serial.print("       X is:");
+    Serial.print(X);
+    Serial.print("       Y is:");
+    Serial.print(Y);
+    Serial.print("       Z is:");
+    Serial.print(Z);
+    */
+    
+    
+   
+    // using a complementary filter to get the true pitch & true roll angles
+
+    // for roll angles:
+/*
+    roll_drift= roll_angle_ADXL-roll_gyro;
+    roll_offset= roll_offset-gain2_roll*roll_drift;
+    roll_gyro= omega_roll-roll_offset+true_roll;
+    true_roll=roll_drift*gain1_roll+roll_gyro;
+    Serial.print("       The TRUE roll angle is: ");
+    Serial.print(true_roll);
+    delay(t);
+    
+    */
+    // Here have 2 complementary filters ; feel free to tweak them but 
+    // MUST ADD UP TO ONE=1
+    true_roll= (true_roll+omega_roll*period)*.94+roll_angle_ADXL*.06;
+    Serial.print("       The TRUE roll angle is: ");
+    Serial.print(true_roll);
+    
+    
+    true_pitch=(true_pitch+omega_pitch*period)*.94+pitch_angle_ADXL*.06;
+    Serial.print("       The TRUE pitch angle is:    ");
+    Serial.print(true_pitch);
+    delay(t);
+    Serial.print('\n');
+    
+    }
+    
+    
+    
+    
+void getADXL_Values() // function to get the ADXL accelerometer values
+      {
+        X0 = readRegister(ADXLAddress, X_Axis_Register_DATAX0);
+        X1 = readRegister(ADXLAddress, X_Axis_Register_DATAX1);
+        X = ((X1<<8 )| X0);
+        X2=X;
+        Y0 = readRegister(ADXLAddress,Y_Axis_Register_DATAY0);
+        Y1 = readRegister(ADXLAddress,Y_Axis_Register_DATAY1);
+        
+        Y = ((Y1<<8 )| Y0);
+        Y2=Y;
+        Z0 = readRegister(ADXLAddress,Z_Axis_Register_DATAZ0);
+        Z1 = readRegister(ADXLAddress,Z_Axis_Register_DATAZ1);
+        Z= ((Z1<<8) |Z0);
+        Z2=Z;
+        
+              
+      } 
+
+void getGyro_Values()
+  {
+    roll0 = readRegister(L3G4200_Address, 0x28);
+    roll1 = readRegister(L3G4200_Address, 0x29);
+    omega_roll1=  ((roll1 << 8) | roll0);
+    pitch0 = readRegister(L3G4200_Address, 0x2A);
+    pitch1 = readRegister(L3G4200_Address, 0x2B);
+    omega_pitch1= ((pitch1 << 8) |pitch0);
+    
+   omega_roll=omega_roll1; // Turn into floating numbers from integers
+   omega_pitch=omega_pitch1;
+
+// calibrate values  before transforming them....
+   omega_roll=omega_roll- roll_cal;
+   omega_pitch=omega_pitch -pitch_cal;
+  
+   omega_roll= omega_roll*(17.5/1000); // convert according to chart by directive of FPS 500
+   omega_pitch=omega_pitch*(17.5/1000);
+    }
+
+//function to write on i2c for less hassle
+void writeRegister(int deviceAddress, byte address, byte val) {
+    Wire.beginTransmission(deviceAddress); // start transmission to device
+    Wire.write(address);       // send register address
+    Wire.write(val);         // send value to write
+    Wire.endTransmission();     // end transmission
+}
+
+     //function to read on i2c for less hassle
+int readRegister(int deviceAddress, byte address){
+
+    int v;
+    Wire.beginTransmission(deviceAddress);
+    Wire.write(address); // register to read
+    Wire.endTransmission();
+
+    Wire.requestFrom(deviceAddress, 1); // read a byte
+
+    while(!Wire.available()) {
+        // waiting
+    }
+
+    v = Wire.read();
+    return v;
+}
